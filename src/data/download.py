@@ -33,13 +33,13 @@ def sample():
 
     return reviews_sample_df, metadata_sample_df
 
-def download(metadata, reviews):
+def download(reviews, metadata):
 
     folder_path = Path(raw_path)
     folder_path.mkdir(parents=True, exist_ok=True)
 
-    metadata.to_parquet(f"{raw_path}{CATEGORY}_metadata_{SAMPLE_SIZE}.parquet")
     reviews.to_parquet(f"{raw_path}{CATEGORY}_reviews_{SAMPLE_SIZE}.parquet")
+    metadata.to_parquet(f"{raw_path}{CATEGORY}_metadata_{SAMPLE_SIZE}.parquet")
 
     print(f"Saved {len(reviews)} reviews and {len(metadata)} items")
 
