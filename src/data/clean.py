@@ -13,7 +13,6 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-PROCESSED_DIR = "../../data/processed"
 
 REVIEW_COLS = [
     "user_id",
@@ -105,7 +104,7 @@ def verify_referential_integrity(reviews_df, metadata_df, id_col="parent_asin", 
     return reviews_df
 
 
-def iterative_filter(df, min_user=2, min_item=5, max_iters=5):
+def iterative_filter(df, min_user=2, min_item=5, max_iters=10):
     """
     Iteratively filter interactions so that every remaining user and item
     meets the minimum interaction threshold.
@@ -223,7 +222,7 @@ def drop_empty_item_texts(metadata_df, text_col="item_text"):
 
     return metadata_df
 
-def clean_pipeline():
+def clean_pipeline(output_dir="../../data/processed"):
     reviews_df = pd.read_parquet("../data/raw/Video_Games_reviews_100000.parquet")
     metadata_df = pd.read_parquet("../data/raw/Video_Games_metadata_100000.parquet")
 
@@ -239,10 +238,15 @@ def clean_pipeline():
     # keep reviews and metadata consistent after empty-text items are dropped
     reviews_df = reviews_df[reviews_df["parent_asin"].isin(metadata_df["parent_asin"])]
 
-    folder_path = Path(PROCESSED_DIR)
+    folder_path = Path(output_dir)
     folder_path.mkdir(parents=True, exist_ok=True)
-    reviews_df.to_parquet(f"{PROCESSED_DIR}/reviews_df.parquet", index=False)
-    metadata_df.to_parquet(f"{PROCESSED_DIR}/metadata_df.parquet", index=False)
+
+    # save only metadata, reviews go to further spliting
+    metadata_df.to_parquet(f"{output_dir}/metadata_clean.parquet", index=False)
+
+    logger.info(f"Saved metadata_clean.parquet to {output_dir}/ ({len(metadata_df)} items)")
+
+    return reviews_df, metadata_df
 
 if __name__ == "__main__":
     clean_pipeline()

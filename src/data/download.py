@@ -1,7 +1,10 @@
 from datasets import load_dataset
 from pathlib import Path
 import pandas as pd
-from numpy.f2py.auxfuncs import throw_error
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+logger = logging.getLogger(__name__)
 
 raw_path = "../../data/raw/"
 CATEGORY = "Video_Games"
@@ -41,7 +44,7 @@ def download(reviews, metadata):
     reviews.to_parquet(f"{raw_path}{CATEGORY}_reviews_{SAMPLE_SIZE}.parquet")
     metadata.to_parquet(f"{raw_path}{CATEGORY}_metadata_{SAMPLE_SIZE}.parquet")
 
-    print(f"Saved {len(reviews)} reviews and {len(metadata)} items")
+    logger.info(f"Saved {len(reviews)} reviews and {len(metadata)} items")
 
 
 if __name__ == "__main__":
