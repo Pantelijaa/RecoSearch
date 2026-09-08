@@ -302,7 +302,7 @@ def build_ground_truth(reviews_df, user_col="user_id", item_col="parent_asin",
     positives = reviews_df.query(f"{rating_col} >= @positive_threshold")
     ground_truth = (
         positives.groupby(user_col)[item_col]
-        .agg(set)
+        .agg(lambda items: set(items))
         .to_dict()
     )
 
