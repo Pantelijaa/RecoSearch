@@ -1,4 +1,3 @@
-from pandas import Series
 """
 Non-personalized baselines for the recommendation task.
 
@@ -21,7 +20,7 @@ import pandas as pd
 
 from src.evaluation.metrics import build_ground_truth, evaluate_recommendations
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 def compute_item_popularity(train_df, item_col="parent_asin", rating_col="rating", positive_threshold=4, by="positive_count"):
@@ -51,7 +50,7 @@ def compute_item_popularity(train_df, item_col="parent_asin", rating_col="rating
     """
 
     if by == "positive_count":
-        scored = train_df.query(f"{rating_col} >= positive_count")
+        scored = train_df.query(f"{rating_col} >= @positive_threshold")
     elif by == "count":
         scored = train_df
     else:
@@ -137,7 +136,7 @@ def popularity_baseline_pipeline(train_path="data/processed/train.parquet",
     train = pd.read_parquet(train_path)
     val = pd.read_parquet(val_path)
 
-    ground_truth = build_ground_truth(train)
+    ground_truth = build_ground_truth(val)
 
     ranked_items, _  = compute_item_popularity(train, by=by)
     seen_items = build_seen_items(train)

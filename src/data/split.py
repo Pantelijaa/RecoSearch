@@ -12,7 +12,7 @@ import pandas as pd
 import logging
 from pathlib import Path
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Based on EDA: 2023-04-30 is the last month with a "healthy"
