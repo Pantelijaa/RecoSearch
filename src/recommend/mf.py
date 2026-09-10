@@ -12,6 +12,7 @@ import logging
 
 import numpy as np
 import torch.nn as nn
+from torch import matmul
 from torch.utils.data import Dataset
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -103,3 +104,37 @@ class BPRDataset(Dataset):
             j = int(self.rng.integers(self.n_items))
 
         return u, i, j
+
+
+class MFModel(nn.Module):
+    """
+    Matrix factorization: score(u, i) = user_emb[u] . item_emb[i] + item_bias[i].
+
+    The item bias absorbs global item popularity so the embedding dot product
+    is free to capture *taste* (who likes what) rather than re-learning "this
+    item is popular". Embeddings are init'd small so early scores start near 0.
+    """
+    def __init__(self, n_users, n_items, embedding_dim=64):
+        super().__init__()
+        self.user_emb = nn.Embedding(n_users, embedding_dim)
+        self.item_emb = nn.Embedding(n_items, embedding_dim)
+        self.item_bias = nn.Embedding(n_items, 1)
+
+        nn.init.normal_(self.user_emb.weight, std=0.01)
+        nn.init.normal_(self.item_emb.weight, std=0.01)
+        nn.init.normal_(self.item_bias.weight)
+
+    def forward(self, users, items):
+        """Score given (users, items) index tensors of equal shape."""
+        u = self.user_emb(users)
+        v = self.item_emb(items)
+        b = self.item_bias(items).squeeze(-1)
+
+        return (u * v).sum(dim=-1) + b
+
+    def score_all_items(self, users):
+        """ Score every item for each user: (batch,) -> (batch, n_items). """
+        u = self.user_emb(users)                # (B, d)
+        scores = matmul(u, self.item_emb.weight.t())   # (B, n_items)
+        scores = scores + self.item_bias.weight.squeeze(-1) # broadcast(n_items,)
+        return scores
