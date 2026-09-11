@@ -11,9 +11,12 @@ setup (implicit positives + BPR + negative sampling) unchanged.
 import logging
 
 import numpy as np
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import matmul
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
+from tqdm.auto import tqdm
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -138,3 +141,78 @@ class MFModel(nn.Module):
         scores = matmul(u, self.item_emb.weight.t())   # (B, n_items)
         scores = scores + self.item_bias.weight.squeeze(-1) # broadcast(n_items,)
         return scores
+
+def bpr_loss(pos_scores, neg_scores):
+    """BPR: push positive scores above sampled-negative scores."""
+    return -F.logsigmoid(pos_scores - neg_scores).mean()
+
+def train_mf(model, dataset, epochs=10, batch_size=4096, lr=1e-3, weight_decay=1e-5, device="cuda"):
+    """
+    Train MF with BPR. Returns the trained model (left on `device`).
+    """
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    model.to(device)
+    model.train()
+    for epoch in range(epochs):
+        running = 0.0
+        for u, i ,j in tqdm(loader, desc=f"epoch {epoch + 1 }/{epochs}", leave=False):
+            u, i ,j = u.to(device), i.to(device), j.to(device)
+            pos = model(u, i)
+            neg = model(u, j)
+            loss = bpr_loss(pos, neg)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            running += loss.item() + len(u)
+
+        logger.info(f"epoch {epoch + 1}/{epochs} - mean BPR loss {running / len(dataset):.4f}")
+
+    return model
+
+def recommend_mf(model, user_ids, user2idx, seen_by_idx, idx2item, k=20, device="cuda", batch_size=1024):
+    """
+    Top-k recommendations per user, masking items seen in train.
+
+    Parameters
+    ----------
+    user_ids : list
+        Original (string) user ids to recommend for. Must all be in user2idx.
+    user2idx : dict
+        id -> index mapping.
+    seen_by_idx : dict[int, set]
+        Items (as indices) each user interacted with in train, to mask out.
+    idx2item : list
+        index -> item id, to map recommendations back to item ids.
+    k : int
+        Number of items per user.
+
+    Returns
+    -------
+    dict[user_id, list]
+        Ranked item-id recommendations per user.
+    """
+    model.to(device)
+    model.eval()
+
+    recommendations = {}
+    with torch.no_grad():
+        for start in range(0, len(user_ids), batch_size):
+            batch_ids = user_ids[start:start + batch_size]
+            batch_idx = [user2idx[uid] for uid in batch_ids]
+            users = torch.tensor(batch_idx, device=device)
+
+            scores = model.score_all_items(users)
+            for row, uidx in enumerate(batch_idx):
+                seen = seen_by_idx.get(uidx)
+                if seen:
+                    scores[row, list(seen)] = float('-inf')
+
+            top = torch.topk(scores, k=k, dim=1).indices.cpu().numpy()
+            for row, uid in enumerate(batch_ids):
+                recommendations[uid] = [idx2item[c] for c in top[row]]
+
+    return recommendations
