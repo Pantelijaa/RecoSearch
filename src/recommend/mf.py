@@ -17,6 +17,8 @@ import torch.nn.functional as F
 from torch import matmul
 from torch.utils.data import Dataset, DataLoader
 from tqdm.auto import tqdm
+import pandas as pd
+from src.evaluation.metrics import build_ground_truth, evaluate_recommendations
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -216,3 +218,56 @@ def recommend_mf(model, user_ids, user2idx, seen_by_idx, idx2item, k=20, device=
                 recommendations[uid] = [idx2item[c] for c in top[row]]
 
     return recommendations
+
+def mf_baseline_pipeline(train_path="data/processed/train.parquet",
+                         val_path="data/processed/val.parquet",
+                         embedding_dim=64, epochs=10, batch_size=2048,
+                         lr=1e-3, weight_decay=1e-5, k_values=(5, 10, 20),
+                         seed=42, device=None):
+    """
+    Fit MF on train, then evaluate on the WARM-user set (val users that also
+    appear in train) so the numbers are comparable to a popularity baseline
+    evaluated on the same set.
+
+    Returns
+    -------
+    dict with keys:
+        "report"   : ranking-metrics DataFrame (MF on warm users)
+        "recs"     : {user_id -> [item_id]} recommendations
+        "gt_warm"  : {user_id -> set} ground truth restricted to warm users
+        "model", "user2idx", "item2idx", "idx2item"
+    """
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(seed)
+    logging.info(f"Training MF on device={device}")
+
+    train = pd.read_parquet(train_path)
+    val = pd.read_parquet(val_path)
+
+    user2idx, item2idx, idx2item = build_id_mappings(train)
+    dataset = BPRDataset(train, user2idx, item2idx, seed=seed)
+
+    model = MFModel(len(user2idx), len(item2idx), embedding_dim=embedding_dim)
+    train_mf(model, dataset, epochs=epochs, batch_size=batch_size, lr=lr, weight_decay=weight_decay, device=device)
+
+    ground_truth = build_ground_truth(val)
+    warm_user_ids = [u for u in ground_truth if u in user2idx]
+    logger.info(
+        f"Warm eval users: {len(warm_user_ids)} of {len(ground_truth)} evaluable "
+        f"val users appear in train ({len(warm_user_ids) / len(ground_truth):.1%})."
+    )
+
+    recs = recommend_mf(model, warm_user_ids, user2idx, dataset.user_interacted, idx2item, k=max(k_values), device=device)
+    gt_warm = {u: ground_truth[u] for u in warm_user_ids}
+
+    logger.info("MF baseline on warm val users:")
+    report = evaluate_recommendations(recs, gt_warm, k_values=k_values)
+
+    return {
+        "report": report, "recs": recs, "gt_warm": gt_warm,
+        "model": model, "user2idx": user2idx,
+        "item2idx": item2idx, "idx2item": idx2item,
+    }
+
+if __name__ == "__main__":
+    mf_baseline_pipeline()
