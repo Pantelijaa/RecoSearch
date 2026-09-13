@@ -18,7 +18,7 @@ from torch import matmul
 from torch.utils.data import Dataset, DataLoader
 from tqdm.auto import tqdm
 import pandas as pd
-from src.evaluation.metrics import build_ground_truth, evaluate_recommendations
+from src.evaluation.metrics import build_ground_truth, evaluate_recommendations, ndcg_at_k
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -127,7 +127,7 @@ class MFModel(nn.Module):
 
         nn.init.normal_(self.user_emb.weight, std=0.01)
         nn.init.normal_(self.item_emb.weight, std=0.01)
-        nn.init.normal_(self.item_bias.weight)
+        nn.init.zeros_(self.item_bias.weight)
 
     def forward(self, users, items):
         """Score given (users, items) index tensors of equal shape."""
@@ -148,32 +148,72 @@ def bpr_loss(pos_scores, neg_scores):
     """BPR: push positive scores above sampled-negative scores."""
     return -F.logsigmoid(pos_scores - neg_scores).mean()
 
-def train_mf(model, dataset, epochs=10, batch_size=4096, lr=1e-3, weight_decay=1e-5, device="cuda"):
+def evaluate_ndcg(model, warm_user_ids, user2idx, seen_by_idx, idx2item, gt_warm,
+                  k=10, device="cuda"):
+    """Mean NDCG@k on the warm val users -- the early-stopping signal."""
+    recs = recommend_mf(model, warm_user_ids, user2idx, seen_by_idx, idx2item,
+                        k=k, device=device)
+    return float(np.mean([ndcg_at_k(recs[u], gt_warm[u], k) for u in warm_user_ids]))
+
+def train_mf(model, dataset, epochs=30, batch_size=2048, lr=1e-3, weight_decay=1e-5, device="cuda", val_eval=None, patience=3, eval_k=10):
     """
-    Train MF with BPR. Returns the trained model (left on `device`).
+    Train MF with BPR. If val_eval is given (a dict of args for evaluate_ndcg),
+    evaluate val NDCG@eval_k each epoch, keep the best-scoring weights, and stop
+    once val hasn't improved for `patience` epochs.
+
+    Returns
+    -------
+    (model, history)
+        model with the BEST-val weights restored; history has per-epoch
+        "train_loss" and (if val_eval) "val_ndcg".
     """
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-
     model.to(device)
-    model.train()
+
+    history = {"train_loss": [], "val_ndcg": []}
+    best_val, best_state, no_improve = -1.0, None, 0
+
     for epoch in range(epochs):
+        model.train()
         running = 0.0
-        for u, i ,j in tqdm(loader, desc=f"epoch {epoch + 1 }/{epochs}", leave=False):
-            u, i ,j = u.to(device), i.to(device), j.to(device)
-            pos = model(u, i)
-            neg = model(u, j)
-            loss = bpr_loss(pos, neg)
+        for u, i, j in tqdm(loader, desc=f"epoch {epoch + 1}/{epochs}", leave=False):
+            u, i, j = u.to(device), i.to(device), j.to(device)
+            loss = bpr_loss(model(u, i), model(u, j))
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-            running += loss.item() + len(u)
+            running += loss.item() * len(u)
 
-        logger.info(f"epoch {epoch + 1}/{epochs} - mean BPR loss {running / len(dataset):.4f}")
+        train_loss = running / len(dataset)
+        history["train_loss"].append(train_loss)
+        msg = f"epoch {epoch + 1}/{epochs} - train BPR loss {train_loss:.4f}"
 
-    return model
+        if val_eval is not None:
+            val_ndcg = evaluate_ndcg(model, device=device, k=eval_k, **val_eval)
+            history["val_ndcg"].append(val_ndcg)
+            msg += f" - val ndcg@{eval_k} {val_ndcg:.4f}"
+
+            if val_ndcg > best_val:
+                best_val = val_ndcg
+                best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                no_improve = 0
+            else:
+                no_improve += 1
+
+        logger.info(msg)
+
+        if val_eval is not None and no_improve >= patience:
+            logger.info(f"Early stopping at epoch {epoch + 1}; best val ndcg@{eval_k}={best_val:.4f}.")
+            break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        logger.info(f"Restored best-val weights (ndcg@{eval_k}={best_val:.4f}).")
+
+    return model, history
 
 def recommend_mf(model, user_ids, user2idx, seen_by_idx, idx2item, k=20, device="cuda", batch_size=1024):
     """
@@ -221,25 +261,12 @@ def recommend_mf(model, user_ids, user2idx, seen_by_idx, idx2item, k=20, device=
 
 def mf_baseline_pipeline(train_path="data/processed/train.parquet",
                          val_path="data/processed/val.parquet",
-                         embedding_dim=64, epochs=10, batch_size=2048,
+                         embedding_dim=64, epochs=30, batch_size=2048,
                          lr=1e-3, weight_decay=1e-5, k_values=(5, 10, 20),
-                         seed=42, device=None):
-    """
-    Fit MF on train, then evaluate on the WARM-user set (val users that also
-    appear in train) so the numbers are comparable to a popularity baseline
-    evaluated on the same set.
-
-    Returns
-    -------
-    dict with keys:
-        "report"   : ranking-metrics DataFrame (MF on warm users)
-        "recs"     : {user_id -> [item_id]} recommendations
-        "gt_warm"  : {user_id -> set} ground truth restricted to warm users
-        "model", "user2idx", "item2idx", "idx2item"
-    """
+                         patience=3, eval_k=10, seed=42, device=None):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     torch.manual_seed(seed)
-    logging.info(f"Training MF on device={device}")
+    logger.info(f"Training MF on device={device}")
 
     train = pd.read_parquet(train_path)
     val = pd.read_parquet(val_path)
@@ -247,24 +274,34 @@ def mf_baseline_pipeline(train_path="data/processed/train.parquet",
     user2idx, item2idx, idx2item = build_id_mappings(train)
     dataset = BPRDataset(train, user2idx, item2idx, seed=seed)
 
-    model = MFModel(len(user2idx), len(item2idx), embedding_dim=embedding_dim)
-    train_mf(model, dataset, epochs=epochs, batch_size=batch_size, lr=lr, weight_decay=weight_decay, device=device)
-
     ground_truth = build_ground_truth(val)
     warm_user_ids = [u for u in ground_truth if u in user2idx]
+    gt_warm = {u: ground_truth[u] for u in warm_user_ids}
     logger.info(
-        f"Warm eval users: {len(warm_user_ids)} of {len(ground_truth)} evaluable "
-        f"val users appear in train ({len(warm_user_ids) / len(ground_truth):.1%})."
+        f"Warm eval users: {len(warm_user_ids)} of {len(ground_truth)} "
+        f"({len(warm_user_ids) / len(ground_truth):.1%})."
     )
 
-    recs = recommend_mf(model, warm_user_ids, user2idx, dataset.user_interacted, idx2item, k=max(k_values), device=device)
-    gt_warm = {u: ground_truth[u] for u in warm_user_ids}
+    val_eval = {
+        "warm_user_ids": warm_user_ids,
+        "user2idx": user2idx,
+        "seen_by_idx": dataset.user_interacted,
+        "idx2item": idx2item,
+        "gt_warm": gt_warm,
+    }
 
-    logger.info("MF baseline on warm val users:")
+    model = MFModel(len(user2idx), len(item2idx), embedding_dim=embedding_dim)
+    model, history = train_mf(model, dataset, epochs=epochs, batch_size=batch_size,
+                              lr=lr, weight_decay=weight_decay, device=device,
+                              val_eval=val_eval, patience=patience, eval_k=eval_k)
+
+    recs = recommend_mf(model, warm_user_ids, user2idx, dataset.user_interacted,
+                        idx2item, k=max(k_values), device=device)
+    logger.info("MF baseline on warm val users (best-val weights):")
     report = evaluate_recommendations(recs, gt_warm, k_values=k_values)
 
     return {
-        "report": report, "recs": recs, "gt_warm": gt_warm,
+        "report": report, "recs": recs, "gt_warm": gt_warm, "history": history,
         "model": model, "user2idx": user2idx,
         "item2idx": item2idx, "idx2item": idx2item,
     }
